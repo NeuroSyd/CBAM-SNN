@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 import matplotlib
 #matplotlib.use('TkAgg')
 import umap
-from ClassificationModel import Cnnbase,ResidualBlock,TCnnbase,SNNBlockV3M2,SnnMLPLayer,SNNBlockV3M1,SNNBlockVS2,SnnResidualBlock,TCFATestBlock,MSM2,TCFATestBlockVCST,TCFATestBlockVTCS,TCFATestBlockVCSTP,TCFATestBlockVCSTPN
+from ClassificationModel import Cnnbase,ResidualBlock,TCnnbase,SNNBlockV3M2,SnnMLPLayer,SNNBlockV3M1,SNNBlockVS2,SnnResidualBlock,MSM2,TCFATestBlockVCSTPN
 from torchvision.datasets import FakeData
 from torchvision.transforms import ToTensor
 import pickle  
@@ -40,6 +40,7 @@ from matplotlib.lines import Line2D
 from scipy.interpolate import interp1d
 from matplotlib.backends.backend_pdf import PdfPages 
 from pathlib import Path
+
 # fixed seed
 gseed = 2024
 #dataset
@@ -72,7 +73,6 @@ def direct_event_to_tensor(eventfile,type='npy',timesteps=4):
         p = event['p']
         w = event['x']
         h = event['y']
-
         data[t, p, h, w] = 1
         return data
     except Exception as e:
@@ -92,17 +92,14 @@ def direct_event_to_tensor_optimized(eventfile, type='npy', timesteps=4):
             raise FileNotFoundError(f"File not found: {eventfile}")
         starttime = event['t'][0]
         unit_time = np.floor(400 / timesteps).astype(np.float32)  # Ensure float32
-
         # Ensure event['t'] and starttime are float32
         event_t = event['t'].astype(np.float32)
         starttime = np.float32(starttime)
-    
         t = ((event_t - starttime) // unit_time).astype(np.int32)
         t = np.clip(t, 0, timesteps - 1)
         p = event['p'].astype(np.int32)
         w = event['x'].astype(np.int32)
         h = event['y'].astype(np.int32)
-
         # Use np.add.at
         np.add.at(data, (t, p, h, w), 1.0)  # Ensure addition with float32
         data = np.clip(data, 0.0, 1.0)  # Ensure float32
@@ -119,6 +116,7 @@ def viz_events(events,inv=False):
     else:
         img[events['y'], events['x']] = 255 * events['p'][:, None]
     return img
+
 # define trining Loop
 
 def train_loop(dataloader, model, loss_fn, optimizer,device='cuda'):
@@ -126,46 +124,32 @@ def train_loop(dataloader, model, loss_fn, optimizer,device='cuda'):
     num_batches = len(dataloader)
     train_loss = 0
     correct = 0
-
     scaler = GradScaler()  # Initialize GradScaler for AMP
-
     preprocess_times = []
     train_times = []
-
     model.train()  # Set model to training mode
     start_preprocess = time.time()
     for batch, (X, y) in enumerate(tqdm(dataloader, desc="Training Progress", leave=False)):
         # Start timing data preprocessing
-        
-
         X = X.to(device, non_blocking=True)
         y = y.to(device, non_blocking=True)
-        #print(f"Input data type: {X.dtype}") 
-
         # End timing data preprocessing
         end_preprocess = time.time()
-        
         preprocess_times.append(end_preprocess - start_preprocess)
-
         # Zero gradients
         optimizer.zero_grad()
-
         # Start timing training process
         start_train = time.time()
-
         with autocast(device_type="cuda"):  # Enable autocasting
             pred, _ = model(X)
             loss = loss_fn(pred, y)
-
         # Backpropagation with scaled loss
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-
         # End timing training process
         end_train = time.time()
         train_times.append(end_train - start_train)
-
         # Accumulate metrics
         train_loss += loss.item()
         if pred.ndim == 3:
@@ -173,15 +157,12 @@ def train_loop(dataloader, model, loss_fn, optimizer,device='cuda'):
         else:
             correct += (pred.argmax(1) == y).type(torch.float).sum().item()
         start_preprocess = time.time()
-
     # Calculate average loss and accuracy
     train_loss /= num_batches
     correct /= size
-
     # Calculate total times
     total_preprocess_time = sum(preprocess_times)/len(preprocess_times)
     total_train_time = sum(train_times)/len(train_times)
-
     print(f"Train Error:")
     print(f"Accuracy: {(100*correct):>0.1f}%, Avg loss: {train_loss:>8f}")
     print(f"Total Preprocess Time: {total_preprocess_time:.4f}s")
@@ -215,28 +196,20 @@ def test_loop(dataloader, model, loss_fn, device='cuda'):
         post_process = 0
         for batch, (X, y) in enumerate(tqdm(dataloader, desc="Testing Progress", leave=False)):
             # Start timing data preprocessing
-            
-
             X = X.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
-
             # End timing data preprocessing
             end_preprocess = time.time()
             preprocess_times.append(end_preprocess - start_preprocess)
-
             # Start timing inference
             start_inference = time.time()
-
             with autocast(device_type="cuda"):
                 pred, features = model(X)
-
             # End timing inference
             end_inference = time.time()
             inference_times.append(end_inference - start_inference)
-
             # Compute loss and accuracy
             post_process += end_inference - start_preprocess
-            
             test_loss += loss_fn(pred, y).item()
             if pred.ndim == 3:
                 correct += SF.accuracy_rate(pred, y) * y.shape[0]
@@ -248,27 +221,21 @@ def test_loop(dataloader, model, loss_fn, device='cuda'):
                 probs = torch.softmax(pred, dim=1)
                 pred_labels = pred.argmax(1)
                 correct += (pred_labels == y).type(torch.float).sum().item()
-
             # Collect predictions and features
             all_preds.extend(pred_labels.cpu().numpy())
             all_labels.extend(y.cpu().numpy())
             all_features.extend(features.cpu().numpy())
             all_probs.extend(probs.cpu().numpy())
             start_preprocess = time.time()
-            
-
     # Calculate average loss and accuracy
     test_loss /= num_batches
     correct /= size
-
     # Generate classification report
     report = classification_report(all_labels, all_preds, labels=np.arange(num_classes), output_dict=True)
-
     # Calculate total times
     total_preprocess_time = sum(preprocess_times)/len(preprocess_times)
     total_inference_time = sum(inference_times)/len(inference_times)
     post_process /= len(dataloader)
-
     print(f"Test Error:")
     print(f"Accuracy: {(100*correct):>0.1f}%, Avg loss: {test_loss:>8f}")
     print(f"Total Preprocess Time: {total_preprocess_time:.4f}s")
@@ -276,7 +243,6 @@ def test_loop(dataloader, model, loss_fn, device='cuda'):
     print(f"Post Process Time: {post_process:.4f}s")
     print("Classification Report:")
     print(report)
-
     return {
         'loss': test_loss,
         'accuracy': correct,
@@ -293,51 +259,38 @@ def plot_precision_recall_curves(y_true, predicted_scores, class_labels, pdf):
     # One-hot encode true labels
     num_classes = len(class_labels)
     y_true_one_hot = np.eye(num_classes)[y_true]
-
     # Initialize the plot
     fig, ax = plt.subplots(figsize=(8, 8))
-
     # Loop through each class and compute Precision-Recall curve
     for i, label in enumerate(class_labels):
         precision, recall, _ = precision_recall_curve(y_true_one_hot[:, i], predicted_scores[:, i])
         avg_precision = average_precision_score(y_true_one_hot[:, i], predicted_scores[:, i])
-
         # Smooth the precision-recall curve by interpolation
         recall_interp = np.linspace(recall.min(), recall.max(), 1000)  # 500 points for smooth curve
         precision_interp_func = interp1d(recall, precision, kind='linear')  # Linear interpolation
         precision_interp = precision_interp_func(recall_interp)
-
         # Plot smoothed Precision-Recall curve
         ax.plot(recall_interp, precision_interp, lw=2, label=f'{label} (AP = {avg_precision:.2f})')
-
     ax.set_xlabel('Recall', fontsize=14)
     ax.set_ylabel('Precision', fontsize=14)
     ax.set_title('Smoothed Precision-Recall Curve for Each Class', fontsize=16)
     ax.legend(loc='best')
     ax.grid(True)
-
     # Save the plot to the PDF
     pdf.savefig(fig)
     plt.close(fig)
     
-    
-
 def plot_results(train_result, test_result,lr_list,path):
     # for visualization during training and testing
     os.makedirs(path, exist_ok=True)
-
     train_loss = [result['loss'] for result in train_result]
     train_acc = [result['accuracy'] for result in train_result]
     test_loss = [result['loss'] for result in test_result]
     test_acc = [result['accuracy'] for result in test_result]
     #train_report = [result['report'] for result in train_result]
     test_report = [result['report'] for result in test_result]
-    
-
-    # 提取最后一个测试结果的特征和标签以用于UMAP可视化
     features = test_result[-1]['features']
     labels = test_result[-1]['labels']
-    
     f1_scores = []
     recall_scores = []
     precision_scores = []
@@ -345,26 +298,20 @@ def plot_results(train_result, test_result,lr_list,path):
         f1_scores.append(report['macro avg']['f1-score'])
         recall_scores.append(report['macro avg']['recall'])
         precision_scores.append(report['macro avg']['precision'])
-    
-    
-
     # UMAP
     global gseed
     colors = ['red', 'green', 'blue', 'yellow', 'purple', 'grey']
     class_labels = ['RBC', 'Neutrophils', 'PBMC', 'Platelet', 'HUVEC', 'Microparticle']
-    
     reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=gseed, n_jobs=1)
     if len(features.shape) >2:
         features = np.sum(features, axis=1)#b,t,f -b f
     embedding = reducer.fit_transform(features)
-
-    # 绘图
+    # plotting
     _, axs = plt.subplots(2, 2, figsize=(18, 12))
     axs[0][0].plot(train_loss, label='Train Loss')
     axs[0][0].plot(test_loss, label='Test Loss')
     axs[0][0].set_title("Loss over Epochs")
     axs[0][0].legend()
-
     axs[1][0].plot(train_acc, label='Train Accuracy')
     axs[1][0].plot(test_acc, label='Test Accuracy')
     axs[1][0].set_title("Accuracy over Epochs")
@@ -387,129 +334,39 @@ def plot_results(train_result, test_result,lr_list,path):
                fontsize=10)
     plt.colorbar(scatter, ax=axs[1][1], orientation='vertical')
     # save image 
-    plt.savefig(f'{path}/training_results.png', dpi=300)  # 指定路径和分辨率
+    plt.savefig(f'{path}/training_results.png', dpi=300) 
     plt.close()  
     _, axs = plt.subplots(1, 3, figsize=(18, 12))
     # F1 Score
     axs[0].plot(f1_scores, label='F1 Score')
     axs[0].set_title("F1 Score over Epochs")
     axs[0].legend()
-
     #Recall
     axs[1].plot(recall_scores, label='Recall')
     axs[1].set_title("Recall over Epochs")
     axs[1].legend()
-
     # Precision
     axs[2].plot(precision_scores, label='Precision')
     axs[2].set_title("Precision over Epochs")
     axs[2].legend()
     plt.savefig(f'{path}/training_eva_results.png', dpi=300)
     plt.close()  
-
-
 # config set
 def create_config_new(num,snnF,time_steps=4,v2f=True,start_dim=4,RlayerNum = 1, act = None,CNNType = None,SNNType = "O_Res18"):
     config_set = []
     if snnF:
         start_dim = start_dim
-        if SNNType == "O_Res18":
-            config_set = [
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (SNNBlockV3M2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (TCFATestBlockVCST,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [],None),#3
-            
-            (SNNBlockV3M2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5
-            (TCFATestBlockVCST,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
-            
-            (SNNBlockV3M2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (TCFATestBlockVCST,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
-            (SNNBlockV3M2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCST,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
-            (SNNBlockV3M2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCST,( start_dim * 32, 3, 1, 1,time_steps, nn.ReLU6), [12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
-        ]
-        elif SNNType == "O_Strict_Res18":
+        if SNNType == "O_Strict_Res18_18":
             config_set =[
             (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (SNNBlockVS2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (TCFATestBlockVCSTPN,( start_dim * 2, 3, 1, 1,time_steps, nn.SiLU), [0],"concat"),#3
-            
-            (SNNBlockVS2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (TCFATestBlockVCSTPN,( start_dim * 4, 3, 1, 1,time_steps, nn.SiLU), [3],"concat"),#6
-            
-            (SNNBlockVS2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (TCFATestBlockVCSTPN,( start_dim * 8, 3, 1, 1,time_steps, nn.SiLU), [6], "concat"),#9
-            
-            (SNNBlockVS2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCSTPN,( start_dim * 16, 3, 1, 1,time_steps, nn.SiLU), [9], "concat"),#12
-            
-            (SNNBlockVS2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCSTPN,( start_dim * 32, 3, 1, 1,time_steps, nn.SiLU), [12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
-        ]
-        elif SNNType == "O_Strict_Res18_2":
-            config_set =[
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (SNNBlockVS2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (TCFATestBlockVCSTPN,( start_dim * 2, 3, 1, 1,time_steps, nn.SiLU), [0],"concat"),#3
-            
-            (SNNBlockVS2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (TCFATestBlockVCSTPN,( start_dim * 2, 3, 1, 1,time_steps, nn.SiLU), [3],"concat"),#6
-            
-            (SNNBlockVS2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (TCFATestBlockVCSTPN,( start_dim * 4, 3, 1, 1,time_steps, nn.SiLU), [6], "concat"),#9
-            
-            (SNNBlockVS2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCSTPN,( start_dim * 8, 3, 1, 1,time_steps, nn.SiLU), [9], "concat"),#12
-            
-            (SNNBlockVS2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCSTPN,( start_dim * 16, 3, 1, 1,time_steps, nn.SiLU), [12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
-        ]
-        elif SNNType == "O_Strict_Res18_18":
-            config_set =[
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
             (SNNBlockVS2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
             (TCFATestBlockVCSTPN,( start_dim * 2, 3, 1, 1,time_steps, nn.SiLU), [0],"concat"),#2
-            
             (SNNBlockVS2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#3
             (TCFATestBlockVCSTPN,( start_dim * 2, 3, 1, 1,time_steps, nn.SiLU), [2],"concat"),#4
-            
             (SNNBlockVS2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [3], "add"),#5
             (TCFATestBlockVCSTPN,( start_dim * 4, 3, 1, 1,time_steps, nn.SiLU), [4], "concat"),#6
-            
             (SNNBlockVS2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [5], "add"),#7
             (TCFATestBlockVCSTPN,( start_dim * 8, 3, 1, 1,time_steps, nn.SiLU), [6], "concat"),#8
-            
             (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
             (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
         ]
@@ -551,121 +408,25 @@ def create_config_new(num,snnF,time_steps=4,v2f=True,start_dim=4,RlayerNum = 1, 
             (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
             (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
         ]
-        elif SNNType == "O_Res18_ATP":
-            config_set = [
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (SNNBlockV3M2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (TCFATestBlockVCSTP,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [],None),#3
-            
-            (SNNBlockV3M2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (TCFATestBlockVCSTP,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
-            
-            (SNNBlockV3M2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (TCFATestBlockVCSTP,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
-            (SNNBlockV3M2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCSTP,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
-            (SNNBlockV3M2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCSTP,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
-        ]
-        elif SNNType == "O_Res18_ATPN":
-            config_set = [
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (SNNBlockV3M2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (TCFATestBlockVCSTPN,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [0],"concat"),#3
-            
-            (SNNBlockV3M2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (TCFATestBlockVCSTPN,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
-            
-            (SNNBlockV3M2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (TCFATestBlockVCSTPN,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
-            (SNNBlockV3M2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCSTPN,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
-            (SNNBlockV3M2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCSTPN,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
-        ]
-        elif SNNType == "O_Res18_NoTA":
-            config_set = [
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (SNNBlockV3M2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [0],"concat"),#2
-            #(TCFATestBlock,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [],None),#3
-            
-            (SNNBlockV3M2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (SnnResidualBlock,( start_dim * 2,  time_steps,True,1,nn.SiLU), [3],"concat"),
-            #(TCFATestBlock,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
-            
-            (SNNBlockV3M2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (SnnResidualBlock,( start_dim * 4, time_steps,True,1,nn.SiLU), [3],"concat"),#2
-            #(TCFATestBlock,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
-            (SNNBlockV3M2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (SnnResidualBlock,( start_dim * 8, time_steps,True,1,nn.SiLU), [3],"concat"),#2
-            #(TCFATestBlock,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
-            (SNNBlockV3M2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1,nn.SiLU), [3],"concat"),#2
-            #(TCFATestBlock,( start_dim * 32, 3, 1, 1,time_steps, nn.ReLU6), [12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,nn.SiLU,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,nn.SiLU,True), [], None),
-        ]
         elif SNNType == "O_Strict_Res18_NoTA":
             config_set = [
             (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
             
             (SNNBlockVS2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
             (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [0],"concat"),#2
-            #(TCFATestBlock,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [],None),#3
-            
+            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [0],"concat"),#2 
             (SNNBlockVS2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
+            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 
             (SnnResidualBlock,( start_dim * 2,  time_steps,True,1,nn.SiLU), [3],"concat"),
-            #(TCFATestBlock,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
-            
             (SNNBlockVS2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
             (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
             (SnnResidualBlock,( start_dim * 4, time_steps,True,1,nn.SiLU), [6],"concat"),#2
-            #(TCFATestBlock,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
             (SNNBlockVS2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
             (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
             (SnnResidualBlock,( start_dim * 8, time_steps,True,1,nn.SiLU), [9],"concat"),#2
-            #(TCFATestBlock,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
             (SNNBlockVS2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
             (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
             (SnnResidualBlock,( start_dim * 16, time_steps,True,1,nn.SiLU), [12],"concat"),#2
-            #(TCFATestBlock,( start_dim * 32, 3, 1, 1,time_steps, nn.ReLU6), [12], "concat"),#14
-            
             (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,nn.SiLU,False), [], None),
             (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,nn.SiLU,True), [], None),
         ]
@@ -676,165 +437,37 @@ def create_config_new(num,snnF,time_steps=4,v2f=True,start_dim=4,RlayerNum = 1, 
             (SNNBlockVS2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
             (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
             (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            #(TCFATestBlock,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [],None),#3
-            
             (SNNBlockVS2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [], None ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
+            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 
             (SnnResidualBlock,( start_dim * 2,  time_steps,True,1,nn.SiLU), [], None),
-            #(TCFATestBlock,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [3],"conct"),#6
-            
             (SNNBlockVS2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [], None),#7
             (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
             (SnnResidualBlock,( start_dim * 4, time_steps,True,1,nn.SiLU), [], None),#2
-            #(TCFATestBlock,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
             (SNNBlockVS2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [], None),#10
             (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
             (SnnResidualBlock,( start_dim * 8, time_steps,True,1,nn.SiLU), [], None),#2
-            #(TCFATestBlock,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
             (SNNBlockVS2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [], None), #13
             (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
             (SnnResidualBlock,( start_dim * 16, time_steps,True,1,nn.SiLU), [], None),#2
-            #(TCFATestBlock,( start_dim * 32, 3, 1, 1,time_steps, nn.ReLU6), [12], "concat"),#14
-            
             (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,nn.SiLU,False), [], None),
             (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,nn.SiLU,True), [], None),
-        ]
-        elif SNNType == "O_Res18_CST":
-            config_set = [
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (SNNBlockV3M2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (TCFATestBlock,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [],None),#3
-            
-            (SNNBlockV3M2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (TCFATestBlockVCST,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
-            
-            (SNNBlockV3M2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (TCFATestBlockVCST,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
-            (SNNBlockV3M2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCST,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
-            (SNNBlockV3M2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVCST,( start_dim * 32, 3, 1, 1,time_steps, nn.ReLU6), [12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
-        ]
-        elif SNNType == "O_Res18_TCS":
-            config_set = [
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (SNNBlockV3M2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,None), [], None),#2
-            (TCFATestBlockVTCS,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [],None),#3
-            
-            (SNNBlockV3M2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (TCFATestBlockVTCS,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
-            
-            (SNNBlockV3M2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (TCFATestBlockVTCS,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
-            (SNNBlockV3M2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVTCS,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
-            (SNNBlockV3M2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlockVTCS,( start_dim * 32, 3, 1, 1,time_steps, nn.ReLU6), [12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
-        ]
-        elif SNNType =="MS_Res18":
-            config_set = [
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (MSM2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [],None),#3
-            
-            (MSM2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (SnnResidualBlock,( start_dim * 2,  time_steps,True,1,nn.SiLU), [3],"concat"),#6
-            
-            (MSM2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (SnnResidualBlock,( start_dim * 4,time_steps,True,1, nn.SiLU), [6], "concat"),#9
-            
-            (MSM2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (SnnResidualBlock,( start_dim * 8, time_steps,True,1, nn.SiLU), [9], "concat"),#12
-            
-            (MSM2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU),[12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
-        ]
-        elif SNNType == "MS_Res18_no_TA":
-            config_set = [
-            (TCnnbase, ( start_dim,7,1,3,time_steps, snn.BatchNormTT2d, None), [], None),#0
-            
-            (MSM2, ( start_dim * 2,  3, 2, 1,time_steps, v2f, act), [], None),#1
-            (SnnResidualBlock,( start_dim * 2, time_steps,True,1,nn.SiLU), [], None),#2
-            (TCFATestBlock,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [],None),#3
-            
-            (MSM2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, act), [1],"add" ),#4
-            (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU
-            (TCFATestBlock,( start_dim * 2, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
-            
-            (MSM2, ( start_dim * 8,3, 2, 1,time_steps, v2f, act), [4], "add"),#7
-            (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
-            (TCFATestBlock,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
-            
-            (MSM2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, act), [7], "add"),#10
-            (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlock,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
-            
-            (MSM2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, act), [10], "add"), #13
-            (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
-            (TCFATestBlock,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6),[12], "concat"),#14
-            
-            (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,None,False), [], None),
-            (SnnMLPLayer,(num,time_steps,snn.BatchNormTT1d,None,True), [], None),
         ]
     else:
         if CNNType is None:
             start_dim = start_dim
             config_set=[
-                (Cnnbase, (start_dim*2, 3, 1, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  # This layer's output will be used later
-                (Cnnbase, (start_dim*4, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  # This layer's output will be used later
+                (Cnnbase, (start_dim*2, 3, 1, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  
+                (Cnnbase, (start_dim*4, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  
                 (ResidualBlock, (start_dim*4, 1,None,2), [], None),
-
-                (Cnnbase, (start_dim*8, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  # This layer's output will be used later
+                (Cnnbase, (start_dim*8, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  
                 (ResidualBlock, (start_dim*8, 1,None,4), [], None),
-
-                (Cnnbase, (start_dim*16, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  # This layer's output will be used later
+                (Cnnbase, (start_dim*16, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None), 
                 (ResidualBlock, (start_dim*16, 1,None,8), [], None),
-                (Cnnbase, (start_dim*32, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  # This layer's output will be used later
+                (Cnnbase, (start_dim*32, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  
                 (ResidualBlock, (start_dim*32, 1,None,8), [], None),
-                (Cnnbase, (start_dim*64, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  # This layer's output will be used later
+                (Cnnbase, (start_dim*64, 3, 2, 1, nn.BatchNorm2d,nn.ReLU6), [], None),  
                 (nn.Linear, (1000,), [], None),
             (nn.Linear, (num,), [], None)]
-        elif CNNType == "DeelpCnn8":
-            config_set = [
-                "DeelpCnn8"
-            ]
-        elif CNNType == "Deelpflow":
-            config_set = [
-                "Deelpflow"
-            ]
         elif CNNType == "ResNet18":
             config_set = [
              "ResNet18",   
@@ -900,14 +533,14 @@ class CustomImageDataset_imF2(Dataset):
             'Microparticle': 5
         }
         class_samples = defaultdict(list)
-        
+        # adapt for different platforms
         for folder_name in os.listdir(self.root_dir):
-            folder_path = self.root_dir / folder_name  # 使用 Path 对象构造路径
+            folder_path = self.root_dir / folder_name  
             setted_idx = setted_dict.get(folder_name, None)
             if setted_idx is not None and folder_path.is_dir():
                 self.class_to_idx[folder_name] = setted_idx
                 for img_name in os.listdir(folder_path):
-                    img_path = folder_path / img_name  # 使用 Path 对象构造路径
+                    img_path = folder_path / img_name  
                     if self.snnF and img_name.lower().endswith('.npy'):
                         class_samples[folder_name].append((img_path, setted_idx))
                     elif not self.snnF and img_name.lower().endswith('.npy'):
@@ -945,7 +578,6 @@ class CustomImageDataset_imF2(Dataset):
                 class_name = next((name for name, idx in setted_dict.items() if idx == id), None)
             else:
                 raise ValueError("target_class should be a class name (str) or class index (int).")
-            
             if class_name is None or class_name not in class_samples:
                 raise ValueError(f"Class '{class_name}' not found in dataset.")
             indices_to_reduce = [i for i, label in enumerate(self.labels) if label == setted_dict[class_name]]
@@ -957,7 +589,6 @@ class CustomImageDataset_imF2(Dataset):
                 del self.labels[idx]
             # update counting numbers
             self.samples_per_class[class_name] = reduce_num
-            
         # Output the number of samples per class
         print("Number of samples per class:")
         for class_name, count in self.samples_per_class.items():
@@ -970,7 +601,6 @@ class CustomImageDataset_imF2(Dataset):
         for img_path in self.image_paths:
             image = self._load_data(img_path)
             self.preloaded_data.append(image)
-    
     def _load_data(self, eventfile):
         if self.cache_dir:
             cache_file = self.cache_dir / f"{eventfile.stem}.pkl"  
@@ -988,7 +618,6 @@ class CustomImageDataset_imF2(Dataset):
             with cache_file.open('wb') as f:
                 pickle.dump(data, f)
         return data
-
     def _clear_cache(self):
         # clean all cached file 
         if self.cache_dir:
@@ -996,11 +625,9 @@ class CustomImageDataset_imF2(Dataset):
                 if filename.endswith('.pkl'):
                     os.remove(self.cache_dir / filename)  
             print('cache cleared')
-                
     def __len__(self):
         # return the total number of samples
         return len(self.image_paths)
-    
     def __getitem__(self, idx):
         if self.preload:
             image = self.preloaded_data[idx]
@@ -1024,7 +651,6 @@ class CustomImageDataset_imF2(Dataset):
         label = self.labels[idx]
         
         return image, label
-
     def num_classes(self):
         return len(self.class_to_idx)
 
@@ -1032,9 +658,6 @@ class CustomImageDataset_imF2(Dataset):
         with open(filename, 'w') as file:
             for class_name, idx in sorted(self.class_to_idx.items()):
                 file.write(f'{idx}: {class_name}\n')            
-                
-                
-    
 
 # import tensorflow_datasets as tfds
 def worker_init_fn(worker_id, rank, seed):
@@ -1043,7 +666,35 @@ def worker_init_fn(worker_id, rank, seed):
     np.random.seed(worker_seed)
     torch.manual_seed(worker_seed)
 
-def trainer(path,cache_path,name,transform,lr,in_channels=4,start_dim=4,snnF=False,v2f=True,sample_size=1000,rnum=1,act =None,ep=300,CNNType = None,SNNType = "O_Res18",imbalance = None,time_step=4):
+def trainer(path,cache_path,name,transform,lr,in_channels=3,start_dim=4,snnF=False,v2f=True,sample_size=1000,rnum=1,act =None,ep=300,CNNType = None,SNNType = "O_Res18",imbalance = None,time_step=4):
+    """
+    Trainer function to initialize and train a classification model.
+
+    Args:
+        path (str): Directory path to the dataset.
+        cache_path (str): Directory path for caching files.
+        name (str): Name for the experiment.
+        transform (callable): Transformation function to be applied to the data.(not available for SNN)
+        lr (float): Learning rate.
+        in_channels (int, optional): Number of input channels. Defaults to 3.
+        start_dim (int, optional): Starting dimension for the model. Defaults to 4.
+        snnF (bool, optional): Flag to use Spiking Neural Network (SNN). Defaults to False.
+        v2f (bool, optional): Some configuration flag. Defaults to True.
+        sample_size (int, optional): Number of samples per class. Defaults to 1000.
+        rnum (int, optional): Number of residual layers. Defaults to 1.
+        act (callable, optional): Activation function. Defaults to None.
+        ep (int, optional): Number of epochs for training. Defaults to 300.
+        CNNType (str, optional): Type of CNN to use. Defaults to None.
+        SNNType (str, optional): Type of SNN to use. Defaults to "O_Strict_Res18_18".
+        imbalance (tuple, optional): Class imbalance adjustment. Defaults to None.Examples:
+                             (classname, imbalance rate x (selected class:others)): for "class 1 , 10 times reduce" ==> (1,50)
+        time_step (int, optional): Number of time steps for SNN. Defaults to 4.
+
+    Returns:
+        list: Training results list.
+        list: Testing results list.
+        str: Path to the saved model and results.
+    """
     base_name = Path.cwd() / f'run_{name}'
     new_name = base_name
     # create a new name if it already exists
@@ -1064,11 +715,7 @@ def trainer(path,cache_path,name,transform,lr,in_channels=4,start_dim=4,snnF=Fal
     print(conf)
     if CNNType is not None and snnF is False:
         print(f"Using {CNNType} CNN")
-        if CNNType == "DeelpCnn8":
-            model = MD.DeelpCnn8(in_channels,numberclass) #model = MD.BaseLineModel(conf,in_channels,numberclass)
-        elif CNNType == "Deelpflow":
-            model = MD.DeepflowModel(in_channels,numberclass)
-        elif CNNType == "InceptionV3":
+        if CNNType == "InceptionV3":
             model = MD.CustomInceptionV3(in_channels,numberclass)
         else:
             model = MD.BaseLineModel(conf,in_channels,numberclass)
@@ -1160,12 +807,12 @@ def trainer(path,cache_path,name,transform,lr,in_channels=4,start_dim=4,snnF=Fal
 
 
 if __name__ == "__main__":
-    #test_training_pipeline()
+#test_training_pipeline()
     
     os.environ["QT_QPA_PLATFORM"] = "offscreen"
     set_seed(gseed)
     '''
-    # for CNN model
+# for CNN model
     lr = 0.0001
     samples = 5000
     start_dim = 4
@@ -1184,7 +831,7 @@ if __name__ == "__main__":
                 ,transform_inc         
                 ,lr,input_dim,start_dim,snnf,v2f,samples,rnum,None,100,CNNtype,SNNtype,imbalance = i,time_step = time_step)
     '''
-    #for SNN model
+#for SNN model
     lr = 0.0008
     samples = 5000
     start_dim = 4
@@ -1200,13 +847,14 @@ if __name__ == "__main__":
     for  time_step in [1]:
         for i in [None]:
             for v2f in [False]:
-                for SNNtype in ["O_Strict_Res18_18"]:#"O_Strict_Res18","O_Res18_ATPN"
+                for SNNtype in ["O_Strict_Res18_18"]:
                     if time_step == 4:
                         lr = 0.0001
                     Name = f"test_snn_cachetest_32_47_full_geed_R_Snn_v2_noFr_output_{snnf}_{lr}_{start_dim}_ATT_{v2f}_{samples}_repeatnum{rnum}_SNN_{SNNtype}_imf_{i}_timestep_{time_step}"
                     trainer(DataPath,CachePath
                             ,Name
                             ,None,lr,input_dim,start_dim,snnf,v2f,samples,rnum,None,100,CNNtype,SNNtype,imbalance = i,time_step = time_step)
+# imbalance test
     lr = 0.0008
     samples = 5000
     start_dim = 4
@@ -1220,7 +868,7 @@ if __name__ == "__main__":
     for  time_step in [1]:
         for i in [(0,50),(1,50),(2,50),(3,50),(4,50),(5,50)]:
             for v2f in [False]:
-                for SNNtype in ["O_Strict_Res18_18"]:#"O_Strict_Res18","O_Res18_ATPN"
+                for SNNtype in ["O_Strict_Res18_18"]:
                     if time_step == 4:
                         lr = 0.0001
                     Name = f"test_snn_cachetest_32_47_full_geed_R_Snn_v2_noFr_output_{snnf}_{lr}_{start_dim}_ATT_{v2f}_{samples}_repeatnum{rnum}_SNN_{SNNtype}_imf_{i}_timestep_{time_step}"

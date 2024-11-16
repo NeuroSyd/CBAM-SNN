@@ -8,10 +8,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import torchvision.models as models
-from Model import Tmaxpool,TCNNBlockV3,TResidualBlock,SnnResidualBlockM
 import numpy as np
 from snntorch import surrogate
-
 import torch
 import torch.nn as nn
 import math
@@ -43,7 +41,19 @@ class DepthwiseSeparableConv(nn.Module):
         x = self.depthwise(x)
         x = self.pointwise(x)
         return x
-
+class Tmaxpool(nn.Module):
+    def __init__(self,kernel_size,stride,padding) -> None:
+        super().__init__()
+        self.mp = nn.MaxPool2d(kernel_size=kernel_size,stride=stride,padding=padding)
+    def forward(self,x):
+        x = x.transpose(0,1)
+        timerange = x.shape[0]
+        rec = []
+        for step in range(timerange):
+            rec.append(self.mp(x[step]))
+        x = torch.stack(rec)
+        x = x.transpose(0,1)
+        return x
 class Cnnbase(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, normalize=nn.BatchNorm2d, activation=nn.ReLU):
         """
@@ -210,12 +220,9 @@ class LCBV2Small(nn.Module):
         self.BN = snn.BatchNormTT2d(out_channels,time_steps)
     def forward(self, x):
         x = x.transpose(0, 1)
-        #print(x.shape)
         timerange, batch_size, _, height, width = x.shape
         mem = self.LIF.init_leaky()
-        #mem_inv = self.inv_LIF.init_leaky()
         final_spk_rec = torch.zeros((timerange, batch_size, self.outchannels, height // self.stride, width // self.stride), device=x.device)
-        #print(final_spk_rec.shape)
         for steps in range(timerange):
             bn = self.BN[steps]
             x0, mem = self.LIF(x[steps], mem)
@@ -243,7 +250,6 @@ class MSM2(nn.Module):
         """
         super().__init__()
         assert in_channels<out_channels
-        #R_C = out_channels - in_channels
         print(time_steps)
         if v2f:
             self.L = nn.ModuleList(
@@ -259,7 +265,6 @@ class MSM2(nn.Module):
             
         else:
             self.L = nn.ModuleList(
-      
                 [
                     LCBV2Small(in_channels=in_channels,out_channels=out_channels//2,
                         kernel_size=kernel_size,stride=stride,
@@ -281,420 +286,6 @@ class MSM2(nn.Module):
         Xr = self.RLCB(Xr)#batch,time,c,w,h
         x = Xl + Xr
         x = self.Ms(x)
-        return x
-
-        
-    
-class TCFATestBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,timesteps, activation=nn.SiLU):
-        """
-        the first version of TCBAM, try to account for temporal information
-        Args:
-            in_channels (int): Number of input channels
-            out_channels (int): Number of output channels
-            kernel_size (int): Kernel size of the convolution
-            stride (int): Stride of the convolution (default: 1)
-            padding (int): Padding of the convolution (default: 0)
-            timesteps (int): Number of time steps (default: 4)
-            activation (nn.Module or None): Activation function (default: nn.SiLU)
-        """
-        super().__init__()
-        self.timesteps = timesteps
-        print(f'time_steps:{self.timesteps}')
-        self.out_channels = out_channels
-        self.stride = stride
-        self.B1 = torch.rand(1)
-        self.TH = torch.rand(1)
-        self.gF =  torch.rand(1)
-        self.LIF = snn.Leaky(beta=self.B1, threshold=self.TH, learn_beta=True, learn_threshold=True,graded_spikes_factor=self.gF,learn_graded_spikes_factor=True)
-        
-        self.conv = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-        self.convM = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=1,
-                stride=stride,
-                padding=0
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-        self.BN = snn.BatchNormTT2d(out_channels, self.timesteps)
-        self.Clinear = nn.Sequential(
-            SnnMLPLayer(out_channels, out_channels//2, self.timesteps,snn.BatchNormTT1d,None),
-            SnnMLPLayer(out_channels//2, out_channels, self.timesteps,snn.BatchNormTT1d,None),
-            )# Corrected in_channels to out_channels
-        self.Tlinear = nn.Sequential(
-            nn.Linear(self.timesteps, self.timesteps//2),
-            nn.BatchNorm1d(self.timesteps//2),
-            nn.ReLU6(inplace=True),
-            nn.Linear(self.timesteps//2, self.timesteps),
-        )
-        self.spatial_conv = nn.Conv2d(2, 1, kernel_size=7, padding=3)
-        
-    def forward(self, x):
-        # x shape: (batch_size, time_steps, channels, height, width)
-        batch_size, time_steps, channels, height, width = x.shape
-        x = x.transpose(0, 1)  # Shape: (time_steps, batch_size, channels, height, width)
-        mem = self.LIF.init_leaky()
-        xout = []
-        mem_rec = []
-        for step in range(self.timesteps):
-            bn = self.BN[step]
-            xo = x[step]
-            xo, mem = self.LIF(xo, mem)
-            xo = self.conv(xo)
-            xo = bn(xo)
-            xout.append(xo)
-            mem_rec.append(self.convM(mem))
-        x = torch.stack(xout)  # Shape: (time_steps, batch_size, channels, height, width)
-        mem_rec = torch.stack(mem_rec)
-        # Calculate firing rate
-        rate = torch.sum(x, dim=0) / self.timesteps  # Shape: (batch_size, channels, height, width)
-        rate = rate.unsqueeze(0)
-        rate = rate.repeat(self.timesteps,1,1,1,1)
-        # Channel Attention
-        channel_att = torch.mean(x, dim=[3, 4])  # Shape: (time_steps, batch_size, channels)
-        channel_att_max, _ = torch.max(x, dim=3)  # Shape: (time_steps, batch_size, channels)
-        channel_att_max, _ = torch.max(channel_att_max, dim=3)  # Shape: (time_steps, batch_size)
-        #print(channel_att.shape)
-        channel_att = self.Clinear(channel_att.transpose(0, 1)).transpose(0, 1)
-        channel_att_max = self.Clinear(channel_att_max.transpose(0, 1)).transpose(0, 1)
-        channel_att += channel_att_max
-        channel_att = torch.sigmoid_(channel_att).unsqueeze(-1).unsqueeze(-1)  # Shape: (time_steps, batch_size, channels, 1, 1)
-        # Spatial Attention
-        avg_pool = torch.mean(x, dim=2)  # Shape: (time_steps, batch_size, height, width)
-        max_pool, _ = torch.max(x, dim=2)
-        spatial_att = torch.stack([avg_pool, max_pool], dim=2)  # Shape: (time_steps, batch_size, 2, height, width)
-        spatial_att = spatial_att.view(-1, 2, height, width)  # Combine time_steps and batch_size
-        spatial_att = self.spatial_conv(spatial_att)  # Shape: (time_steps * batch_size, 1, height, width)
-        spatial_att = torch.sigmoid_(spatial_att)
-        spatial_att = spatial_att.view(time_steps, batch_size, 1, height, width)
-        # Temporal Attention
-        Time_attention = torch.mean(x*mem_rec, dim=[2, 3, 4])  # Shape: (time_steps, batch_size)
-        #print(Time_attention.shape)
-        Time_attention_max, _ = torch.max(x*mem_rec, dim=2)  # Shape: (time_steps, batch_size)
-        #print(Time_attention_max.shape)
-        Time_attention_max, _ = torch.max(Time_attention_max, dim=2)  # Shape: (time_steps, batch_size)
-        #print(Time_attention_max.shape)
-        Time_attention_max, _ = torch.max(Time_attention_max, dim=2)  # Shape: (time_steps, batch_size)
-        #print(Time_attention_max.shape)
-        Time_attention = self.Tlinear(Time_attention.transpose(0, 1))  # Shape: (batch_size, time_steps)
-        Time_attention_max = self.Tlinear(Time_attention_max.transpose(0, 1))  # Shape: (batch_size, time_steps)
-        Time_attention += Time_attention_max
-        Time_attention = torch.sigmoid_(Time_attention).transpose(0, 1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # Shape: (time_steps, batch_size, 1, 1, 1)
-        
-        # Combine Attentions
-        combined_attention = channel_att * spatial_att * Time_attention  # Element-wise multiplication
-        x = x * combined_attention  # Apply combined attention to x
-        x = x.transpose(0, 1)  # Shape: (batch_size, time_steps, channels, height, width)
-        return x
-
-class TCFATestBlockVCST(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,timesteps, activation=nn.SiLU):
-        """
-        the second version of TCBAM, try to account for temporal information
-        Args:
-            in_channels (int): Number of input channels
-            out_channels (int): Number of output channels
-            kernel_size (int): Kernel size of the convolution
-            stride (int): Stride of the convolution (default: 1)
-            padding (int): Padding of the convolution (default: 0)
-            timesteps (int): Number of time steps (default: 4)
-            activation (nn.Module or None): Activation function (default: nn.SiLU)
-        """
-        super().__init__()
-        self.timesteps = timesteps
-        print(f'time_steps:{self.timesteps}')
-        self.out_channels = out_channels
-        self.stride = stride
-        self.B1 = torch.rand(1)
-        self.TH = torch.rand(1)
-        self.gF =  torch.rand(1)
-        self.LIF = snn.Leaky(beta=self.B1, threshold=self.TH, learn_beta=True, learn_threshold=True,graded_spikes_factor=self.gF,learn_graded_spikes_factor=True)
-        
-        self.conv = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-        self.convM = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=1,
-                stride=stride,
-                padding=0
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-        self.BN = snn.BatchNormTT2d(out_channels, self.timesteps)
-        self.Clinear = nn.Sequential(
-            SnnMLPLayer(out_channels, out_channels//2, self.timesteps,snn.BatchNormTT1d,None),
-            SnnMLPLayer(out_channels//2, out_channels, self.timesteps,snn.BatchNormTT1d,None),
-            )# Corrected in_channels to out_channels
-        self.Tlinear = nn.Sequential(
-            nn.Linear(self.timesteps, self.timesteps//2),
-            nn.BatchNorm1d(self.timesteps//2),
-            nn.ReLU6(inplace=True),
-            nn.Linear(self.timesteps//2, self.timesteps),
-        )
-        self.spatial_conv = nn.Conv2d(2, 1, kernel_size=7, padding=3)
-        
-    def forward(self, x):
-        # x shape: (batch_size, time_steps, channels, height, width)
-        batch_size, time_steps, channels, height, width = x.shape
-        x = x.transpose(0, 1)  # Shape: (time_steps, batch_size, channels, height, width)
-        mem = self.LIF.init_leaky()
-        xout = []
-        mem_rec = []
-        x0 = x 
-        for step in range(self.timesteps):
-            bn = self.BN[step]
-            xo = x[step]
-            xo, mem = self.LIF(xo, mem)
-            xo = self.conv(xo)
-            xo = bn(xo)
-            xout.append(xo)
-            mem_rec.append(self.convM(mem))
-        x = torch.stack(xout)  # Shape: (time_steps, batch_size, channels, height, width)
-        mem_rec = torch.stack(mem_rec)
-       
-        # Calculate firing rate
-        rate = torch.sum(x, dim=0) / self.timesteps  # Shape: (batch_size, channels, height, width)
-        rate = rate.unsqueeze(0)
-        rate = rate.repeat(self.timesteps,1,1,1,1)
-        #print(rate.shape)
-        
-        # Channel Attention
-        channel_att = torch.mean(x, dim=[3, 4])  # Shape: (time_steps, batch_size, channels)
-        channel_att_max, _ = torch.max(x, dim=3)  # Shape: (time_steps, batch_size, channels)
-        channel_att_max, _ = torch.max(channel_att_max, dim=3)  # Shape: (time_steps, batch_size)
-        #print(channel_att.shape)
-        channel_att = self.Clinear(channel_att.transpose(0, 1)).transpose(0, 1)
-        channel_att_max = self.Clinear(channel_att_max.transpose(0, 1)).transpose(0, 1)
-        channel_att += channel_att_max
-        channel_att = torch.sigmoid_(channel_att).unsqueeze(-1).unsqueeze(-1)  # Shape: (time_steps, batch_size, channels, 1, 1)
-        x = x * channel_att
-        
-        # Spatial Attention
-        avg_pool = torch.mean(x, dim=2)  # Shape: (time_steps, batch_size, height, width)
-        max_pool, _ = torch.max(x, dim=2)
-        spatial_att = torch.stack([avg_pool, max_pool], dim=2)  # Shape: (time_steps, batch_size, 2, height, width)
-        spatial_att = spatial_att.view(-1, 2, height, width)  # Combine time_steps and batch_size
-        spatial_att = self.spatial_conv(spatial_att)  # Shape: (time_steps * batch_size, 1, height, width)
-        spatial_att = torch.sigmoid_(spatial_att)
-        spatial_att = spatial_att.view(time_steps, batch_size, 1, height, width)
-        x = x * spatial_att
-        # Temporal Attention
-        Time_attention = torch.mean(x*mem_rec, dim=[2, 3, 4])  # Shape: (time_steps, batch_size)
-        Time_attention_max, _ = torch.max(x*mem_rec, dim=2)  # Shape: (time_steps, batch_size)
-        Time_attention_max, _ = torch.max(Time_attention_max, dim=2)  # Shape: (time_steps, batch_size)
-        Time_attention_max, _ = torch.max(Time_attention_max, dim=2)  # Shape: (time_steps, batch_size)
-        Time_attention = self.Tlinear(Time_attention.transpose(0, 1))  # Shape: (batch_size, time_steps)
-        Time_attention_max = self.Tlinear(Time_attention_max.transpose(0, 1))  # Shape: (batch_size, time_steps)
-        Time_attention += Time_attention_max
-        Time_attention = torch.sigmoid_(Time_attention).transpose(0, 1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # Shape: (time_steps, batch_size, 1, 1, 1)
-        x = x * Time_attention+x0
-        print(x.shape)
-        
-        x = x.transpose(0, 1)  # Shape: (batch_size, time_steps, channels, height, width)
-        return x
-
-class TCFATestBlockVCSTP(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding, timesteps, activation=nn.SiLU):
-    """
-    __init__ method for TCFATestBlockVCSTP
-
-    Parameters:
-    in_channels (int): The number of input channels.
-    out_channels (int): The number of output channels.
-    kernel_size (int): The size of the kernel.
-    stride (int): The stride of the convolution.
-    padding (int): The padding of the convolution.
-    timesteps (int): The number of time steps.
-    activation (nn.Module, optional): The activation function. Defaults to nn.SiLU.
-    """
-        super().__init__()
-        self.timesteps = timesteps
-        print(f'time_steps:{self.timesteps}')
-        self.out_channels = out_channels
-        self.stride = stride
-        self.B1 = torch.rand(1)
-        self.TH = torch.rand(1)
-        self.gF = torch.rand(1)
-        self.factor = nn.Parameter(torch.ones(1))
-        self.LIF = snn.Leaky(beta=self.B1, threshold=self.TH, learn_beta=True, learn_threshold=True,graded_spikes_factor=self.gF, learn_graded_spikes_factor=True)
-
-        self.B3 = torch.rand(1)
-        self.TH3 = torch.rand(1)
-        self.gF3 = torch.rand(1)
-        self.LIFM = snn.Leaky(beta=self.B3, threshold=self.TH3, learn_beta=True, learn_threshold=True,
-                              graded_spikes_factor=self.gF3, learn_graded_spikes_factor=True,reset_mechanism='none')
-        
-        self.B2 = torch.rand(1)
-        self.TH2 = torch.rand(1)
-        self.gF2 = torch.rand(1)
-        self.factor2 = nn.Parameter(torch.ones(1))
-        self.LIF2 = snn.Leaky(beta=self.B2, threshold=self.TH2, learn_beta=True, learn_threshold=True, graded_spikes_factor=self.gF2, learn_graded_spikes_factor=True)
-
-        self.conv = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=in_channels,
-                out_channels=out_channels//2,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-        self.convM = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=in_channels,
-                out_channels=out_channels//2,
-                kernel_size=1,
-                stride=stride,
-                padding=0
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-        self.conv2 = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=out_channels//2,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-
-        self.BN = snn.BatchNormTT2d(out_channels//2, self.timesteps)
-        self.BNM = snn.BatchNormTT2d(out_channels//2, self.timesteps)
-        self.BN2 = snn.BatchNormTT2d(out_channels, self.timesteps)
-        self.fus = nn.Sequential(
-            nn.Conv1d(2,1,1,1,0),
-            nn.ReLU6(inplace=True),
-            nn.BatchNorm1d(1),
-        )
-        self.Clinear = nn.Sequential(
-            nn.Linear(out_channels// 2, out_channels // 4),
-            nn.ReLU6(inplace=True),
-            nn.BatchNorm1d(out_channels // 4),
-            nn.Linear(out_channels // 4, out_channels//2),
-        )
-        self.Tlinear = nn.Sequential(
-            nn.Linear(self.timesteps, self.timesteps // 2),
-            nn.BatchNorm1d(self.timesteps // 2),
-            nn.ReLU6(inplace=True),
-            nn.Linear(self.timesteps // 2, self.timesteps),
-        )
-        self.spatial_conv = nn.Conv2d(2, 1, kernel_size=7, padding=3)
-        if in_channels != out_channels:
-            self.residual = nn.Sequential(
-                LCBV2(in_channels, out_channels, kernel_size=1, stride=1, time_steps=timesteps,padding=0,activation=activation),
-            )
-        else:
-            self.residual = None
-
-    def forward(self, x):
-        # x shape: (time_steps, batch_size, channels, height, width)
-        x = x.transpose(0, 1)
-        time_steps, batch_size, channels, height, width = x.shape
-        #print(time_steps, batch_size, channels, height, width)
-        mem = self.LIF.init_leaky()
-        mem2 = self.LIF2.init_leaky()
-        memm = self.LIFM.init_leaky() 
-        xout = []
-        mem_rec = []
-        if self.residual is not None:
-            x0 = self.residual(x.transpose(0, 1)).transpose(0, 1)
-        else:
-            x0 = x
-    
-        for step in range(self.timesteps):
-            bn = self.BN[step]
-            xo = x[step]  # Shape: (batch_size, channels, height, width)
-            #x0.append(self.residual(xo))
-            xo, mem = self.LIF(xo, mem)
-            xo = self.conv(xo)
-            xo = bn(xo)
-
-            # Channel Attention
-            channel_att = torch.mean(xo, dim=[2, 3])  # Shape: (batch_size, out_channels)
-            channel_att_max, _ = torch.max(xo, dim=2)  # Shape: (batch_size, out_channels, width)
-            channel_att_max, _ = torch.max(channel_att_max, dim=2)  # Shape: (batch_size, out_channels)
-            channel_att = self.Clinear(channel_att)  # Shape: (batch_size, out_channels)
-            channel_att_max = self.Clinear(channel_att_max)
-            channel_att += channel_att_max
-            channel_att = torch.sigmoid_(channel_att).unsqueeze(-1).unsqueeze(-1)  # Shape: (batch_size, out_channels, 1, 1)
-            xo = xo * channel_att
-            #print(xo.shape)
-
-            # Spatial Attention
-            avg_pool = torch.mean(xo, dim=1)  # Shape: (batch_size, height, width)
-            max_pool, _ = torch.max(xo, dim=1)
-            spatial_att = torch.stack([avg_pool, max_pool], dim=1)  # Shape: (batch_size, 2, height, width)
-            spatial_att = self.spatial_conv(spatial_att)  # Shape: (batch_size, 1, height, width)
-            spatial_att = torch.sigmoid_(spatial_att)
-            xo = xo * spatial_att
-            #print(xo.shape)
-            
-            xout.append(xo)
-            mem_rec.append(self.convM(mem))
-            
-        x = torch.stack(xout)  # Shape: (time_steps, batch_size, out_channels, height, width)
-        mem_rec2 = []
-        mem_rec = torch.stack(mem_rec)
-        for step in range(self.timesteps):
-            bnm = self.BNM[step]
-            memm = mem_rec[step]
-            xo = x[step]  # Shape: (batch_size, out_channels, height, width)
-            xo, memm = self.LIFM(xo, memm)
-            
-            mem_rec2.append(bnm(memm))
-        
-        mem_rec2 = torch.stack(mem_rec2) 
-        
-        # Calculate firing rate
-        Time_attention = torch.mean(x, dim=[2, 3, 4])  # Shape: (time_steps, batch_size)
-        Time_attention_max, _ = torch.max(mem_rec2, dim=2)  # Shape: (time_steps, batch_size)
-        Time_attention_max, _ = torch.max(Time_attention_max, dim=2)  # Shape: (time_steps, batch_size)
-        Time_attention_max, _ = torch.max(Time_attention_max, dim=2)  # Shape: (time_steps, batch_size)
-        Time_attention = self.Tlinear(Time_attention.transpose(0, 1))  # Shape: (batch_size, time_steps)
-        Time_attention_max = self.Tlinear(Time_attention_max.transpose(0, 1))  # Shape: (batch_size, time_steps)
-        Time_attention_max = Time_attention_max.unsqueeze(1)
-        Time_attention = Time_attention.unsqueeze(1)
-        Time_attention = torch.concat([Time_attention, Time_attention_max],dim=1)
-        Time_attention = self.fus(Time_attention).transpose(0,2).squeeze(1)
-        Time_attention = torch.sigmoid_(Time_attention).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # Shape: (time_steps, batch_size, 1, 1, 1)
-
-        xout = []
-        x = x * Time_attention
-        for step in range(self.timesteps):
-            bn = self.BN2[step]
-            xo = x[step]  # Shape: (batch_size, channels, height, width)
-            xo, mem = self.LIF2(xo, mem2)
-            xo = self.conv2(xo)
-            xo = bn(xo)
-            xout.append(xo)
-        x = torch.stack(xout)
-        x = x+x0
-        x = x.transpose(0, 1)  # Shape: (batch_size, time_steps, out_channels, height, width)
         return x
 
 class TCFATestBlockVCSTPN(nn.Module):
@@ -780,10 +371,8 @@ class TCFATestBlockVCSTPN(nn.Module):
             self.residual = None
 
     def forward(self, x):
-        # x shape: (time_steps, batch_size, channels, height, width)
         x = x.transpose(0, 1)
         time_steps, batch_size, channels, height, width = x.shape
-        #print(time_steps, batch_size, channels, height, width)
         mem = self.LIF.init_leaky()
         mem2 = self.LIF2.init_leaky()
         mem2
@@ -796,171 +385,41 @@ class TCFATestBlockVCSTPN(nn.Module):
     
         for step in range(self.timesteps):
             bn = self.BN[step]
-            xo = x[step]  # Shape: (batch_size, channels, height, width)
-            #x0.append(self.residual(xo))
+            xo = x[step]  
             xo, mem = self.LIF(xo, mem)
             xo = self.conv(xo)
             xo = bn(xo)
-
             # Channel Attention
-            channel_att = torch.mean(xo, dim=[2, 3])  # Shape: (batch_size, out_channels)
-            channel_att_max, _ = torch.max(xo, dim=2)  # Shape: (batch_size, out_channels, width)
-            channel_att_max, _ = torch.max(channel_att_max, dim=2)  # Shape: (batch_size, out_channels)
-            channel_att = self.Clinear(channel_att)  # Shape: (batch_size, out_channels)
+            channel_att = torch.mean(xo, dim=[2, 3])  
+            channel_att_max, _ = torch.max(xo, dim=2)  
+            channel_att_max, _ = torch.max(channel_att_max, dim=2)  
+            channel_att = self.Clinear(channel_att)  
             channel_att_max = self.Clinear(channel_att_max)
             channel_att += channel_att_max
-            channel_att = torch.sigmoid_(channel_att).unsqueeze(-1).unsqueeze(-1)  # Shape: (batch_size, out_channels, 1, 1)
+            channel_att = torch.sigmoid_(channel_att).unsqueeze(-1).unsqueeze(-1) 
             xo = xo * channel_att
-            #print(xo.shape)
-
             # Spatial Attention
-            avg_pool = torch.mean(xo, dim=1)  # Shape: (batch_size, height, width)
+            avg_pool = torch.mean(xo, dim=1)  
             max_pool, _ = torch.max(xo, dim=1)
-            spatial_att = torch.stack([avg_pool, max_pool], dim=1)  # Shape: (batch_size, 2, height, width)
-            spatial_att = self.spatial_conv(spatial_att)  # Shape: (batch_size, 1, height, width)
+            spatial_att = torch.stack([avg_pool, max_pool], dim=1)  
+            spatial_att = self.spatial_conv(spatial_att)  
             spatial_att = torch.sigmoid_(spatial_att)
             xo = xo * spatial_att
-            #print(xo.shape)
-
             xout.append(xo)
             mem_rec.append(self.convM(mem))
-        x = torch.stack(xout)  # Shape: (time_steps, batch_size, out_channels, height, width)
+        x = torch.stack(xout)  
         xout = []
-        
         for step in range(self.timesteps):
             bn = self.BN2[step]
-            xo = x[step]  # Shape: (batch_size, channels, height, width)
-            #x0.append(self.residual(xo))
+            xo = x[step]  
             xo, mem = self.LIF2(xo, mem2)
             xo = self.conv2(xo)
             xo = bn(xo)
             xout.append(xo)
         x = torch.stack(xout)
         x = x+x0
-        x = x.transpose(0, 1)  # Shape: (batch_size, time_steps, out_channels, height, width)
+        x = x.transpose(0, 1)
         return x
-
-
-
-class TCFATestBlockVTCS(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride, padding,timesteps, activation=nn.SiLU):
-        """
-        Args:
-            in_channels (int): Number of input channels
-            out_channels (int): Number of output channels
-            kernel_size (int): Kernel size of the convolution
-            stride (int): Stride of the convolution (default: 1)
-            padding (int): Padding of the convolution (default: 0)
-            timesteps (int): Number of time steps (default: 4)
-            activation (nn.Module or None): Activation function (default: nn.SiLU)
-        """
-        super().__init__()
-        self.timesteps = timesteps
-        print(f'time_steps:{self.timesteps}')
-        self.out_channels = out_channels
-        self.stride = stride
-        self.B1 = torch.rand(1)
-        self.TH = torch.rand(1)
-        self.gF =  torch.rand(1)
-        self.LIF = snn.Leaky(beta=self.B1, threshold=self.TH, learn_beta=True, learn_threshold=True,graded_spikes_factor=self.gF,learn_graded_spikes_factor=True)
-        
-        
-        self.conv = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=padding
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-        self.convM = nn.Sequential(
-            DepthwiseSeparableConv(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=1,
-                stride=stride,
-                padding=0
-            ),
-            activation(inplace=True) if activation is not None else nn.Identity(),
-        )
-        self.BN = snn.BatchNormTT2d(out_channels, self.timesteps)
-        self.Clinear = nn.Sequential(
-            SnnMLPLayer(out_channels, out_channels//2, self.timesteps,snn.BatchNormTT1d,None),
-            SnnMLPLayer(out_channels//2, out_channels, self.timesteps,snn.BatchNormTT1d,None),
-            )# Corrected in_channels to out_channels
-        self.Tlinear = nn.Sequential(
-            nn.Linear(self.timesteps, self.timesteps//2),
-            nn.BatchNorm1d(self.timesteps//2),
-            nn.ReLU6(inplace=True),
-            nn.Linear(self.timesteps//2, self.timesteps),
-        )
-        self.spatial_conv = nn.Conv2d(2, 1, kernel_size=7, padding=3)
-        
-    def forward(self, x):
-        # x shape: (batch_size, time_steps, channels, height, width)
-        batch_size, time_steps, channels, height, width = x.shape
-        x = x.transpose(0, 1)  # Shape: (time_steps, batch_size, channels, height, width)
-        mem = self.LIF.init_leaky()
-        xout = []
-        mem_rec = []
-        for step in range(self.timesteps):
-            bn = self.BN[step]
-            xo = x[step]
-            xo, mem = self.LIF(xo, mem)
-            xo = self.conv(xo)
-            xo = bn(xo)
-            xout.append(xo)
-            mem_rec.append(self.convM(mem))
-        x = torch.stack(xout)  # Shape: (time_steps, batch_size, channels, height, width)
-        mem_rec = torch.stack(mem_rec)
-        x0 = x 
-        # Calculate firing rate
-        rate = torch.sum(x, dim=0) / self.timesteps  # Shape: (batch_size, channels, height, width)
-        rate = rate.unsqueeze(0)
-        rate = rate.repeat(self.timesteps,1,1,1,1)
-        #print(rate.shape)
-        
-        # Temporal Attention
-        Time_attention = torch.mean(x*mem_rec, dim=[2, 3, 4])  # Shape: (time_steps, batch_size)
-        #print(Time_attention.shape)
-        Time_attention_max, _ = torch.max(x*mem_rec, dim=2)  # Shape: (time_steps, batch_size)
-        #print(Time_attention_max.shape)
-        Time_attention_max, _ = torch.max(Time_attention_max, dim=2)  # Shape: (time_steps, batch_size)
-        #print(Time_attention_max.shape)
-        Time_attention_max, _ = torch.max(Time_attention_max, dim=2)  # Shape: (time_steps, batch_size)
-        #print(Time_attention_max.shape)
-        Time_attention = self.Tlinear(Time_attention.transpose(0, 1))  # Shape: (batch_size, time_steps)
-        Time_attention_max = self.Tlinear(Time_attention_max.transpose(0, 1))  # Shape: (batch_size, time_steps)
-        Time_attention += Time_attention_max
-        Time_attention = torch.sigmoid_(Time_attention).transpose(0, 1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        x = x * Time_attention
-        # Channel Attention
-        channel_att = torch.mean(x, dim=[3, 4])  # Shape: (time_steps, batch_size, channels)
-        channel_att_max, _ = torch.max(x, dim=3)  # Shape: (time_steps, batch_size, channels)
-        channel_att_max, _ = torch.max(channel_att_max, dim=3)  # Shape: (time_steps, batch_size)
-        #print(channel_att.shape)
-        channel_att = self.Clinear(channel_att.transpose(0, 1)).transpose(0, 1)
-        channel_att_max = self.Clinear(channel_att_max.transpose(0, 1)).transpose(0, 1)
-        channel_att += channel_att_max
-        channel_att = torch.sigmoid_(channel_att).unsqueeze(-1).unsqueeze(-1)  # Shape: (time_steps, batch_size, channels, 1, 1)
-        x = x * channel_att
-        
-        # Spatial Attention
-        avg_pool = torch.mean(x, dim=2)  # Shape: (time_steps, batch_size, height, width)
-        max_pool, _ = torch.max(x, dim=2)
-        spatial_att = torch.stack([avg_pool, max_pool], dim=2)  # Shape: (time_steps, batch_size, 2, height, width)
-        spatial_att = spatial_att.view(-1, 2, height, width)  # Combine time_steps and batch_size
-        spatial_att = self.spatial_conv(spatial_att)  # Shape: (time_steps * batch_size, 1, height, width)
-        spatial_att = torch.sigmoid_(spatial_att)
-        spatial_att = spatial_att.view(time_steps, batch_size, 1, height, width)
-        x = x * spatial_att+x0
-        
-        
-        x = x.transpose(0, 1)  # Shape: (batch_size, time_steps, channels, height, width)
-        return x
-
 
 class SnnResidualBlock(nn.Module):
     def __init__(self,in_channels,out_channels, time_steps,use_residual=True,num_repeats = 1,activation = nn.SiLU):
@@ -1021,10 +480,6 @@ class ResidualBlock(nn.Module):
         
         return x
 
-
-
-
-
 class MLPLayer(nn.Module):
     def __init__(self, indim, outdim, normalize=nn.BatchNorm1d, activation=nn.ReLU):
         """
@@ -1077,8 +532,6 @@ class SnnMLPLayer(nn.Module):
             self.bn = nn.ModuleList()
             for i in range(time_steps):
                 self.bn += [nn.Identity(outdim)]
-                
-                 
         if activation is not None:
             self.act = activation(inplace=True)
         else:
@@ -1092,7 +545,6 @@ class SnnMLPLayer(nn.Module):
             xo = x[st]
             bni = self.bn[st]
             linear_T = self.linear[st]
-            #print(f'xo{xo.shape}')
             xo,mem = self.LIF(xo,mem)
             if self.bn is not None:
                 xo= bni(linear_T(xo))
@@ -1101,9 +553,7 @@ class SnnMLPLayer(nn.Module):
             xo = self.act(xo)
             spk_rec.append(xo)
         if self.outF:
-            #x = spk_rec[-1]
             x = torch.stack(spk_rec)
-            #x = x.transpose(0, 1)
         else:
             x = torch.stack(spk_rec)
             x = x.transpose(0, 1)
@@ -1170,13 +620,13 @@ class MS(nn.Module):
 
 class SNNBlockV3M1(nn.Module):
     def __init__(self,in_channels,out_channels,kernel_size,stride,padding,time_steps,v2f = True,activation = nn.SiLU):
-    """
-    Initialize the SNNBlockV3M1 module.(EMS M1 residual layer) 
+        """
+        Initialize the SNNBlockV3M1 module.(EMS M1 residual layer) 
 
-    This module consists of two branches, L and R, each with a sequence of layers. The choice of layers
-    is determined by the `v2f` flag. Each branch processes the input data through distinct convolutional
-    and pooling layers.
-    """
+        This module consists of two branches, L and R, each with a sequence of layers. The choice of layers
+        is determined by the `v2f` flag. Each branch processes the input data through distinct convolutional
+        and pooling layers.
+        """
         super().__init__()
         assert in_channels >= out_channels
         if v2f:
@@ -1272,8 +722,8 @@ class SNNBlockVS2(nn.Module):
             Xl = layer(Xl)
         Xr = self.mp(Xr)
         Xr0 = Xr
-        Xr0 = self.RLCB(Xr0)#batch,time,c,w,h
-        Xr = torch.concat([Xr,Xr0],dim=2)#b,t,c,w,h
+        Xr0 = self.RLCB(Xr0)
+        Xr = torch.concat([Xr,Xr0],dim=2)
         x = Xl + Xr
         return x
 
@@ -1362,90 +812,11 @@ class Full_E_RES(nn.Module):
         x = self.RLCB(x)#batch,time,c,w,h
         return x
     
-# model for deepflow
-class SimpleConvFactory(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, activation='relu'):
-        super(SimpleConvFactory, self).__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.activation = activation
 
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.bn(x)
-        if self.activation == 'relu':
-            x = F.relu(x)
-        return x
 
-class DualDownsampleFactory(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super(DualDownsampleFactory, self).__init__()
-        self.conv = SimpleConvFactory(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
-        self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-    def forward(self, x):
-        conv = self.conv(x)
-        pool = self.pool(x)
-        return torch.cat([conv, pool], dim=1)
-
-class DualFactory(nn.Module):
-    def __init__(self, in_channels, ch_1x1, ch_3x3):
-        super(DualFactory, self).__init__()
-        self.conv1x1 = SimpleConvFactory(in_channels, ch_1x1, kernel_size=1, padding=0)
-        self.conv3x3 = SimpleConvFactory(in_channels, ch_3x3, kernel_size=3, padding=1)
-
-    def forward(self, x):
-        conv1x1 = self.conv1x1(x)
-        conv3x3 = self.conv3x3(x)
-        return torch.cat([conv1x1, conv3x3], dim=1)
-
-class DeepflowModel(nn.Module):
-    def __init__(self,in_channels,num_classes):
-        
-        super(DeepflowModel, self).__init__()
-        self.conv1 = SimpleConvFactory(in_channels, 96, kernel_size=3, padding=1, activation='relu')
-        self.in3a = DualFactory(96, 32, 32)
-        self.in3b = DualFactory(64, 32, 48)
-        self.in3c = DualDownsampleFactory(80, 80) #112 160
-        self.in4a = DualFactory(160, 112, 48)
-        self.in4b = DualFactory(160, 96, 64)
-        self.in4c = DualFactory(160, 80, 80)
-        self.in4d = DualFactory(160, 48, 96)
-        self.in4e = DualDownsampleFactory(144, 96) #56
-        self.in5a = DualFactory(240, 176, 160)
-        self.in5b = DualFactory(336, 176, 160)
-        self.in6a = DualDownsampleFactory(336, 96) #28
-        self.in6b = DualFactory(432, 176, 160)
-        self.in6c = DualFactory(336, 176, 160)
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.flatten = nn.Flatten()
-        self.fc = nn.Linear(336, num_classes)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.in3a(x)
-        x = self.in3b(x)
-        x = self.in3c(x)
-        x = self.in4a(x)
-        x = self.in4b(x)
-        x = self.in4c(x)
-        x = self.in4d(x)
-        x = self.in4e(x)
-        x = self.in5a(x)
-        x = self.in5b(x)
-        x = self.in6a(x)
-        x = self.in6b(x)
-        x = self.in6c(x)
-        x = self.global_avg_pool(x)
-        x = self.flatten(x)
-        feature = x
-        x = self.fc(x)
-        return x,feature
 
 # define the funtions of all used modual
-ConvList = [nn.Conv1d, nn.Conv2d, nn.Conv3d,Cnnbase,ResidualBlock,LCBV2,SNNBlockV3M2,SNNBlockV3M1,
-            SnnResidualBlockM,TCnnbase,TCFATestBlock,MSM2,TCFATestBlockVCST,TCFATestBlockVTCS,TCFATestBlockVCSTP,
-            TCFATestBlockVCSTPN,SNNBlockVS2]
+ConvList = [nn.Conv1d, nn.Conv2d, nn.Conv3d,Cnnbase,ResidualBlock,LCBV2,SNNBlockV3M2,SNNBlockV3M1,TCnnbase,MSM2,TCFATestBlockVCSTPN,SNNBlockVS2]
 LinearList = [nn.Linear,MLPLayer,SnnMLPLayer]
 ResidualList = [ResidualBlock,SnnResidualBlock]
 class ClassificationModel_New_New(nn.Module):
@@ -1467,8 +838,8 @@ class ClassificationModel_New_New(nn.Module):
         self.config_set = config_set
         self.shape = imageshape
         self.layers = nn.ModuleList()
-        self.skip_convs = nn.ModuleDict()  # 存储用于调整通道数的 1x1 卷积层
-        self.skip_connections = {}  # 存储跳跃连接信息
+        self.skip_convs = nn.ModuleDict()  
+        self.skip_connections = {} 
         self.snnFlag = snnF
         self.timestpes = timestpes
         self._create_conv_layers()
@@ -1740,7 +1111,6 @@ class BaseLineModel(nn.Module):
                 padding=self.model.conv1.padding,            
                 bias=self.model.conv1.bias is not None      
             )
-        # 修改全连接层以适应自定义类别数
         self.fc = nn.Linear(self.model.fc.in_features, num_classes)
 
     def forward(self, x):
@@ -1766,7 +1136,6 @@ class CustomInceptionV3(nn.Module):
         self.model.fc = nn.Linear(self.model.fc.in_features, num_classes)
 
     def forward(self, x):
-        # 使用 Inception v3 的前向传播逻辑
         x = self.model.Conv2d_1a_3x3(x)
         x = self.model.Conv2d_2a_3x3(x)
         x = self.model.Conv2d_2b_3x3(x)
@@ -1792,10 +1161,10 @@ class CustomInceptionV3(nn.Module):
         features = x.clone()
         x = self.model.fc(x)
         return x, features
+    
 '''
 Test and demo
 '''    
-#Darknet53 Backbone
 if __name__ == "__main__":
     CNN_config_set=[]
 
@@ -1814,17 +1183,14 @@ if __name__ == "__main__":
             (SNNBlockVS2, ( start_dim * 4, 3, 2, 1,time_steps, v2f, None), [1],"add" ),#4
             (SnnResidualBlock,( start_dim * 4,  time_steps,True,1,nn.SiLU), [], None),#5 
             (SnnResidualBlock,( start_dim * 2,  time_steps,True,1,nn.SiLU), [3],"concat"),
-            #(TCFATestBlock,( start_dim * 4, 3, 1, 1,time_steps, nn.ReLU6), [3],"concat"),#6
             
             (SNNBlockVS2, ( start_dim * 8,3, 2, 1,time_steps, v2f, None), [4], "add"),#7
             (SnnResidualBlock,( start_dim * 8,time_steps,True,1, nn.SiLU), [], None),#8
             (SnnResidualBlock,( start_dim * 4, time_steps,True,1,nn.SiLU), [3],"concat"),#2
-            #(TCFATestBlock,( start_dim * 8, 3, 1, 1,time_steps, nn.ReLU6), [6], "concat"),#9
             
             (SNNBlockVS2, ( start_dim * 16, 3, 2, 1,time_steps, v2f, None), [7], "add"),#10
             (SnnResidualBlock,( start_dim * 16, time_steps,True,1, nn.SiLU), [], None),#11
             (SnnResidualBlock,( start_dim * 8, time_steps,True,1,nn.SiLU), [3],"concat"),#2
-            #(TCFATestBlock,( start_dim * 16, 3, 1, 1,time_steps, nn.ReLU6), [9], "concat"),#12
             
             (SNNBlockVS2, ( start_dim * 32, 3, 2, 1,time_steps, v2f, None), [10], "add"), #13
             (SnnResidualBlock,( start_dim * 32, time_steps,True,1, nn.SiLU), [], None),#11
@@ -1833,9 +1199,8 @@ if __name__ == "__main__":
             (SnnMLPLayer,(1000,time_steps,snn.BatchNormTT1d,nn.SiLU,False), [], None),
             (SnnMLPLayer,(10,time_steps,snn.BatchNormTT1d,nn.SiLU,True), [], None),
         ]
-
+# Model Test
     x = torch.randn(16 ,3, 224, 224)
-    #model = ClassificationModel_New_New(num_classes=10, in_channels=4, config_set=SNN_config_set,snnF=True,timestpes=1)
     model = DeelpCnn8(in_channels=3, num_classes=10)
     output,f = model(x)
     print(f'out: {output.shape}')
