@@ -5,4 +5,8 @@ The sample footage for human blood cells captured by the event camera was conver
 
 The event-based, neuromorphic cell dataset can be accessed via https://doi.org/10.6084/m9.figshare.27788970.
 
+Neuromorphic Cell Dataset can be accessed via https://doi.org/10.6084/m9.figshare.27788970
+
+Supporting video samples can be accessed via https://doi.org/10.6084/m9.figshare.27789078
+
 
