@@ -5,3 +5,4 @@ The supplementary sample footage for human blood cells captured by the event cam
 
 The event-based, neuromorphic cell dataset can be accessed via https://doi.org/10.6084/m9.figshare.27788970.
 
+Cite the following article: Ziyao Zhang, Haoxiang Yang, Jiayin Li, Shin Wei Chong, Jason K. Eshraghian, Ken-Tye Yong, Daniele Vigolo, Helen McGuire, and Omid Kavehei "Neuromorphic Imaging Cytometry on Human Blood Cells" bioRxiv:623904, 2024.
